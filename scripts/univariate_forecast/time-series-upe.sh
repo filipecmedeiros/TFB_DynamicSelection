@@ -19,6 +19,6 @@ python ./scripts/run_benchmark.py \
     --strategy-args '{"horizon": 30}' \
     --save-path "daily" \
     --gpus 5 \
-    --num-workers 3
-
+    --num-workers 3 \
+    --report-method dash
 

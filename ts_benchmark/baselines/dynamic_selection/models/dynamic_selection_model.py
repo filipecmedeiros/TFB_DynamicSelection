@@ -80,9 +80,6 @@ class DynamicSelectionModel(ModelBase):
         """
         Train the model.
         """
-        # This is a placeholder for the actual training logic.
-        # The original file does not have a clear training part,
-        # so we are initializing the models and data here.
         # Dummy models for demonstration
         self.models = [ModeloTeste(i) for i in range(10)]
         # Dummy training data
