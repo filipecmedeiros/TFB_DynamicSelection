@@ -185,8 +185,8 @@ def plot_all_series(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Get unique series names
-    series_names = results_df['file_name'].unique()
+    # Get unique series names, filtering out NaN values
+    series_names = results_df['file_name'].dropna().unique()
     print(f"Found {len(series_names)} time series to plot")
     
     if create_pdf:
@@ -194,6 +194,11 @@ def plot_all_series(
         pdf = PdfPages(pdf_path)
     
     for series_name in series_names:
+        # Skip if series_name is NaN or not a string
+        if pd.isna(series_name) or not isinstance(series_name, str):
+            print(f"\nSkipping invalid series name: {series_name}")
+            continue
+            
         print(f"\nPlotting {series_name}...")
         
         # Create individual PNG
