@@ -12,6 +12,7 @@ import sys
 import base64
 import pickle
 import argparse
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -20,6 +21,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_pdf import PdfPages
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Add TFB to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -42,7 +51,7 @@ def decode_data(encoded_str: str) -> Any:
         decoded = base64.b64decode(encoded_str.encode('utf-8'))
         return pickle.loads(decoded)
     except Exception as e:
-        print(f"Error decoding data: {e}")
+        logger.error(f"Error decoding data: {e}")
         return None
 
 
@@ -74,12 +83,42 @@ def extract_values(data: Any, variable_idx: int = 0) -> np.ndarray:
         return np.array(data).flatten()
 
 
+def create_model_color_mapping(results_df: pd.DataFrame) -> Dict[str, tuple]:
+    """
+    Create a consistent color mapping for all models in the dataset.
+    
+    Args:
+        results_df: DataFrame with evaluation results
+        
+    Returns:
+        Dictionary mapping model names to RGB color tuples
+    """
+    # Get unique model names
+    model_names = sorted(results_df['model_name'].dropna().unique())
+    n_models = len(model_names)
+    
+    # Choose appropriate colormap based on number of models
+    if n_models <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))[:n_models]
+    elif n_models <= 20:
+        colors = plt.cm.tab20(np.linspace(0, 1, 20))[:n_models]
+    else:
+        # For more than 20 models, use a continuous colormap
+        colors = plt.cm.gist_rainbow(np.linspace(0, 1, n_models))
+    
+    # Create mapping
+    color_mapping = {model: colors[i] for i, model in enumerate(model_names)}
+    
+    return color_mapping
+
+
 def plot_single_series(
     results_df: pd.DataFrame,
     series_name: str,
     variable_idx: int = 0,
     save_path: Optional[str] = None,
-    figsize: tuple = (15, 8)
+    figsize: tuple = (15, 8),
+    model_colors: Optional[Dict[str, tuple]] = None
 ) -> plt.Figure:
     """
     Plot forecast comparison for a single time series.
@@ -90,6 +129,7 @@ def plot_single_series(
         variable_idx: Index of variable to plot (for multivariate)
         save_path: Path to save the figure (optional)
         figsize: Figure size
+        model_colors: Dictionary mapping model names to colors (optional)
         
     Returns:
         Matplotlib figure object
@@ -98,7 +138,7 @@ def plot_single_series(
     series_results = results_df[results_df['file_name'] == series_name].copy()
     
     if len(series_results) == 0:
-        print(f"No results found for series: {series_name}")
+        logger.warning(f"No results found for series: {series_name}")
         return None
     
     # Create figure
@@ -109,13 +149,13 @@ def plot_single_series(
     actual_data = decode_data(first_row['actual_data'])
     
     if actual_data is None:
-        print(f"No actual data found for {series_name}. Make sure save_true_pred was enabled.")
+        logger.warning(f"No actual data found for {series_name}. Make sure save_true_pred was enabled.")
         return None
     
     actual_values = extract_values(actual_data, variable_idx)
     
     if actual_values is None:
-        print(f"Could not extract actual values for {series_name}")
+        logger.warning(f"Could not extract actual values for {series_name}")
         return None
     
     # Plot actual values
@@ -124,22 +164,23 @@ def plot_single_series(
             linewidth=2.5, color='black', alpha=0.8, zorder=100)
     
     # Plot predictions for each model
-    colors = plt.cm.tab10(np.linspace(0, 1, min(10, len(series_results))))
-    if len(series_results) > 10:
-        colors = plt.cm.tab20(np.linspace(0, 1, len(series_results)))
+    # Use provided color mapping or create a local one
+    if model_colors is None:
+        model_colors = create_model_color_mapping(results_df)
     
-    for (idx, row), color in zip(series_results.iterrows(), colors):
+    for idx, row in series_results.iterrows():
         model_name = row['model_name']
+        color = model_colors.get(model_name, 'gray')  # Default to gray if model not in mapping
         predicted_data = decode_data(row['inference_data'])
         
         if predicted_data is None:
-            print(f"No prediction data for {model_name}")
+            logger.warning(f"No prediction data for {model_name}")
             continue
         
         predicted_values = extract_values(predicted_data, variable_idx)
         
         if predicted_values is None:
-            print(f"Could not extract predictions for {model_name}")
+            logger.warning(f"Could not extract predictions for {model_name}")
             continue
         
         # Get metrics for legend
@@ -162,7 +203,7 @@ def plot_single_series(
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Saved plot to: {save_path}")
+        logger.info(f"Saved plot to: {save_path}")
     
     return fig
 
@@ -185,9 +226,13 @@ def plot_all_series(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
+    # Create consistent color mapping for all models
+    model_colors = create_model_color_mapping(results_df)
+    logger.info(f"Created color mapping for {len(model_colors)} models")
+    
     # Get unique series names, filtering out NaN values
     series_names = results_df['file_name'].dropna().unique()
-    print(f"Found {len(series_names)} time series to plot")
+    logger.info(f"Found {len(series_names)} time series to plot")
     
     if create_pdf:
         pdf_path = os.path.join(output_dir, 'all_forecasts_comparison.pdf')
@@ -196,14 +241,15 @@ def plot_all_series(
     for series_name in series_names:
         # Skip if series_name is NaN or not a string
         if pd.isna(series_name) or not isinstance(series_name, str):
-            print(f"\nSkipping invalid series name: {series_name}")
+            logger.warning(f"Skipping invalid series name: {series_name}")
             continue
             
-        print(f"\nPlotting {series_name}...")
+        logger.info(f"Plotting {series_name}...")
         
-        # Create individual PNG
+        # Create individual PNG with consistent colors
         png_path = os.path.join(output_dir, f'{series_name.replace(".csv", "")}_comparison.png')
-        fig = plot_single_series(results_df, series_name, variable_idx, save_path=png_path)
+        fig = plot_single_series(results_df, series_name, variable_idx,
+                                save_path=png_path, model_colors=model_colors)
         
         # Add to PDF
         if create_pdf and fig is not None:
@@ -214,9 +260,9 @@ def plot_all_series(
     
     if create_pdf:
         pdf.close()
-        print(f"\n✓ Combined PDF saved to: {pdf_path}")
+        logger.info(f"✓ Combined PDF saved to: {pdf_path}")
     
-    print(f"\n✓ All plots saved to: {output_dir}/")
+    logger.info(f"✓ All plots saved to: {output_dir}/")
 
 
 def create_summary_plot(results_df: pd.DataFrame, output_path: str = 'plots/summary.png') -> None:
@@ -232,7 +278,7 @@ def create_summary_plot(results_df: pd.DataFrame, output_path: str = 'plots/summ
     available_metrics = [m for m in metrics if m in results_df.columns]
     
     if not available_metrics:
-        print("No metrics found for summary plot")
+        logger.warning("No metrics found for summary plot")
         return
     
     summary = results_df.groupby('model_name')[available_metrics].mean()
@@ -253,7 +299,7 @@ def create_summary_plot(results_df: pd.DataFrame, output_path: str = 'plots/summ
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"✓ Summary plot saved to: {output_path}")
+    logger.info(f"✓ Summary plot saved to: {output_path}")
     plt.close()
 
 
@@ -300,17 +346,17 @@ def main():
     args = parser.parse_args()
     
     # Load results
-    print(f"Loading results from: {args.results_dir}")
+    logger.info(f"Loading results from: {args.results_dir}")
     results_df = load_record_data([args.results_dir])
     
-    print(f"Loaded {len(results_df)} evaluation records")
-    print(f"Models: {results_df['model_name'].unique().tolist()}")
-    print(f"Series: {results_df['file_name'].nunique()} unique time series")
+    logger.info(f"Loaded {len(results_df)} evaluation records")
+    logger.info(f"Models: {results_df['model_name'].unique().tolist()}")
+    logger.info(f"Series: {results_df['file_name'].nunique()} unique time series")
     
     # Check if predictions are available
     if 'actual_data' not in results_df.columns or 'inference_data' not in results_df.columns:
-        print("\n⚠️  ERROR: No prediction data found in results!")
-        print("Make sure you ran the evaluation with save_true_pred=true")
+        logger.error("⚠️  ERROR: No prediction data found in results!")
+        logger.error("Make sure you ran the evaluation with save_true_pred=true")
         return
     
     # Create summary plot
