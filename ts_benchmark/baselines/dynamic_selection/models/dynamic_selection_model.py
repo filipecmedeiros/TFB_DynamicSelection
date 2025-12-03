@@ -4,8 +4,9 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error as MAE
 from sklearn.svm import SVR
+from sklearn.ensemble import GradientBoostingRegressor
 from darts import TimeSeries
-from darts.models import AutoARIMA, LinearRegressionModel, NBEATSModel, NHiTSModel, XGBModel, RegressionModel, Prophet
+from darts.models import AutoARIMA, LinearRegressionModel, NBEATSModel, NHiTSModel, RegressionModel, Prophet
 
 from ts_benchmark.models.model_base import ModelBase
 
@@ -203,20 +204,26 @@ class DynamicSelectionModel(ModelBase):
             except Exception as e:
                 logger.warning(f"Failed Prophet(seasonality_mode={seasonality_mode}): {e}")
         
-        # Add XGBModel with different configurations
-        # try:
-        #     model = DartsModelWrapper(
-        #         XGBModel(
-        #             lags=self.window_size,
-        #             output_chunk_length=1,
-        #             random_state=2025
-        #         ),
-        #         train_data
-        #     )
-        #     if model.is_fitted:
-        #         self.pool_of_models.append(model)
-        # except Exception as e:
-        #     logger.warning(f"Failed XGBModel(lags={self.window_size}): {e}")
+        # Add GradientBoostingRegressor as a stable alternative to XGBoost
+        for n_estimators in [50, 100]:
+            try:
+                model = DartsModelWrapper(
+                    RegressionModel(
+                        lags=self.window_size,
+                        output_chunk_length=1,
+                        model=GradientBoostingRegressor(
+                            n_estimators=n_estimators,
+                            learning_rate=0.1,
+                            max_depth=3,
+                            random_state=42
+                        )
+                    ),
+                    train_data
+                )
+                if model.is_fitted:
+                    self.pool_of_models.append(model)
+            except Exception as e:
+                logger.warning(f"Failed GradientBoostingRegressor(n_estimators={n_estimators}): {e}")
         
         logger.info(f"Total models in pool: {len(self.pool_of_models)}")
         
