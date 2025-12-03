@@ -3,12 +3,9 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error as MAE
-from sklearn.svm import SVR
-from sklearn.ensemble import GradientBoostingRegressor
-from darts import TimeSeries
-from darts.models import AutoARIMA, LinearRegressionModel, NBEATSModel, NHiTSModel, RegressionModel, Prophet
 
 from ts_benchmark.models.model_base import ModelBase
+from .model_pool_factory import ModelPoolFactory
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +107,7 @@ class DynamicSelectionModel(ModelBase):
 
         return preds
 
+
     def forecast_fit(
         self, train_data: pd.DataFrame, *, train_ratio_in_tv: float = 1.0, **kwargs
     ) -> "ModelBase":
@@ -120,112 +118,9 @@ class DynamicSelectionModel(ModelBase):
         self.window_size = self.config.get("window_size", 30)
         logger.info(f"Using window_size: {self.window_size}")
         
-        # Create pool of models
-        self.pool_of_models = []
-        
-        # Add AutoARIMA models
-        for seasonal in [True, False]:
-            for m in range(1, 5):
-                try:
-                    model = DartsModelWrapper(AutoARIMA(seasonal=seasonal, m=m), train_data)
-                    if model.is_fitted:
-                        self.pool_of_models.append(model)
-                except Exception as e:
-                    logger.warning(f"Failed AutoARIMA(seasonal={seasonal}, m={m}): {e}")
-        
-        # Add LinearRegressionModel
-        try:
-            model = DartsModelWrapper(LinearRegressionModel(lags=self.window_size, output_chunk_length=1), train_data)
-            if model.is_fitted:
-                self.pool_of_models.append(model)
-        except Exception as e:
-            logger.warning(f"Failed LinearRegressionModel(lags={self.window_size}): {e}")
-        
-        # Add NBEATSModel
-        try:
-            model = DartsModelWrapper(
-                NBEATSModel(
-                    input_chunk_length=self.window_size,
-                    output_chunk_length=1,
-                    n_epochs=10,
-                    pl_trainer_kwargs={"enable_progress_bar": False}
-                ),
-                train_data
-            )
-            if model.is_fitted:
-                self.pool_of_models.append(model)
-        except Exception as e:
-            logger.warning(f"Failed NBEATSModel: {e}")
-        
-        # # Add NHiTSModel
-        try:
-            model = DartsModelWrapper(
-                NHiTSModel(
-                    input_chunk_length=self.window_size,
-                    output_chunk_length=1,
-                    n_epochs=10,
-                    pl_trainer_kwargs={"enable_progress_bar": False}
-                ),
-                train_data
-            )
-            if model.is_fitted:
-                self.pool_of_models.append(model)
-        except Exception as e:
-            logger.warning(f"Failed NHiTSModel: {e}")
-        
-        # Add SVR models with different kernels and configurations
-        for kernel in ['rbf', 'linear', 'poly']:
-            try:
-                model = DartsModelWrapper(
-                    RegressionModel(
-                        lags=self.window_size,
-                        output_chunk_length=1,
-                        model=SVR(kernel=kernel, C=1.0, epsilon=0.1)
-                    ),
-                    train_data
-                )
-                if model.is_fitted:
-                    self.pool_of_models.append(model)
-            except Exception as e:
-                logger.warning(f"Failed SVR(kernel={kernel}, lags={self.window_size}): {e}")
-        
-        # Add Prophet models with different configurations
-        for seasonality_mode in ['additive', 'multiplicative']:
-            try:
-                model = DartsModelWrapper(
-                    Prophet(
-                        seasonality_mode=seasonality_mode,
-                        add_seasonalities=None
-                    ),
-                    train_data
-                )
-                if model.is_fitted:
-                    self.pool_of_models.append(model)
-            except Exception as e:
-                logger.warning(f"Failed Prophet(seasonality_mode={seasonality_mode}): {e}")
-        
-        # Add GradientBoostingRegressor as a stable alternative to XGBoost
-        for n_estimators in [50, 100]:
-            try:
-                model = DartsModelWrapper(
-                    RegressionModel(
-                        lags=self.window_size,
-                        output_chunk_length=1,
-                        model=GradientBoostingRegressor(
-                            n_estimators=n_estimators,
-                            learning_rate=0.1,
-                            max_depth=3,
-                            random_state=42
-                        )
-                    ),
-                    train_data
-                )
-                if model.is_fitted:
-                    self.pool_of_models.append(model)
-            except Exception as e:
-                logger.warning(f"Failed GradientBoostingRegressor(n_estimators={n_estimators}): {e}")
-        
-        logger.info(f"Total models in pool: {len(self.pool_of_models)}")
+        # Create pool of models using factory
+        factory = ModelPoolFactory(window_size=self.window_size)
+        self.pool_of_models = factory.create_pool(train_data)
         
         # Prepare training windows using sliding window approach
         train_values = train_data.values.flatten()
@@ -259,64 +154,3 @@ class DynamicSelectionModel(ModelBase):
             horizon,
         )
         return np.array(preds)
-
-
-class DartsModelWrapper:
-    """Wrapper to adapt darts models for dynamic selection."""
-    
-    def __init__(self, darts_model, train_data: pd.DataFrame):
-        self.darts_model = darts_model
-        self.model_name = darts_model.__class__.__name__
-        self.is_fitted = False
-        
-        # Store model parameters for display
-        self.model_params = self._extract_model_params()
-        
-        try:
-            train_series = TimeSeries.from_dataframe(train_data)
-            self.darts_model.fit(train_series)
-            self.is_fitted = True
-        except Exception as e:
-            logger.warning(f"Failed to fit {self.model_name}: {e}")
-    
-    def _extract_model_params(self):
-        """Extract relevant parameters from the darts model."""
-        params = {}
-        
-        # Common parameters to extract
-        param_names = ['seasonal', 'm', 'lags', 'output_chunk_length', 'input_chunk_length',
-                      'n_epochs', 'batch_size', 'learning_rate']
-        
-        for param in param_names:
-            if hasattr(self.darts_model, param):
-                value = getattr(self.darts_model, param)
-                # Only include non-None values
-                if value is not None:
-                    params[param] = value
-        
-        return params
-    
-    def predict(self, X):
-        """Make predictions on multiple windows."""
-        if not self.is_fitted:
-            return np.full(X.shape[0], np.nan)
-        
-        preds = []
-        for i in range(X.shape[0]):
-            try:
-                window_df = pd.DataFrame(X[i].reshape(-1, 1))
-                window_series = TimeSeries.from_dataframe(window_df)
-                forecast = self.darts_model.predict(n=1, series=window_series)
-                preds.append(forecast.values()[0, 0])
-            except Exception:
-                preds.append(X[i][-1])  # Fallback to last value
-        
-        return np.array(preds)
-    
-    def __str__(self):
-        # Format parameters as a compact string
-            return f"DartsModelWrapper({self.model_name})"
-    
-    def __repr__(self):
-        return self.__str__()
-
